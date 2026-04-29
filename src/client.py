@@ -124,31 +124,47 @@ def http_get(url, max_redirects=5):
     raise Exception('Too many redirects')
 
 
-def handle_search(search_term):
+def get_search_results(search_term):
     query = quote_plus(search_term)
     _, _, body = http_get(f"https://html.duckduckgo.com/html/?q={query}")
 
-    results = re.findall(
+    raw = re.findall(
         r'<a[^>]+class="result__a"[^>]*href="([^"]+)"[^>]*>(.*?)</a>',
         body,
         re.DOTALL | re.IGNORECASE,
     )
 
-    count = 0
-    for href, title in results:
-        if count >= 10:
+    results = []
+    for href, title in raw:
+        if len(results) >= 10:
             break
         title = strip_html(title).strip()
         uddg = re.search(r'[?&]uddg=([^&]+)', href)
         if uddg:
             href = unquote_plus(uddg.group(1))
         if title and href:
-            count += 1
-            print(f"{count}. {title}")
-            print(f"   {href}\n")
+            results.append((title, href))
+    return results
 
-    if count == 0:
+
+def handle_search(search_term, open_index=None):
+    results = get_search_results(search_term)
+
+    if not results:
         print("No results found.")
+        return
+
+    if open_index is not None:
+        if open_index < 1 or open_index > len(results):
+            print(f"Invalid index. Choose between 1 and {len(results)}.")
+            return
+        _, url = results[open_index - 1]
+        handle_url(url)
+        return
+
+    for i, (title, href) in enumerate(results, 1):
+        print(f"{i}. {title}")
+        print(f"   {href}\n")
 
 
 def handle_url(url):
@@ -185,8 +201,16 @@ def main():
         if len(args) < 2:
             print("Error: -s requires a search term")
             sys.exit(1)
-        search_term = ' '.join(args[1:])
-        handle_search(search_term)
+        rest = args[1:]
+        open_index = None
+        if rest and rest[-1].isdigit():
+            open_index = int(rest[-1])
+            rest = rest[:-1]
+        if not rest:
+            print("Error: -s requires a search term")
+            sys.exit(1)
+        search_term = ' '.join(rest)
+        handle_search(search_term, open_index)
 
     else:
         print(f"Unknown option: {args[0]}")
