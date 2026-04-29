@@ -2,7 +2,13 @@ import sys
 import socket
 import ssl
 import re
+import os
+import json
+import hashlib
+import time
 from urllib.parse import urlparse, quote_plus, unquote_plus
+
+CACHE_DIR = os.path.join(os.path.dirname(__file__), '..', '.cache')
 
 if sys.stdout.encoding and sys.stdout.encoding.lower() != 'utf-8':
     sys.stdout.reconfigure(encoding='utf-8', errors='replace')
@@ -23,6 +29,46 @@ def strip_html(text):
     text = re.sub(r'\n{3,}', '\n\n', text)
     text = re.sub(r'[ \t]+', ' ', text)
     return text.strip()
+
+
+def cache_key(url):
+    return hashlib.md5(url.encode()).hexdigest()
+
+
+def cache_load(url):
+    path = os.path.join(CACHE_DIR, cache_key(url))
+    if not os.path.exists(path):
+        return None
+    with open(path, 'r', encoding='utf-8') as f:
+        entry = json.load(f)
+    if time.time() > entry['expires']:
+        return None
+    return entry['headers'], entry['body']
+
+
+def cache_save(url, headers, body):
+    max_age = 0
+    cc = headers.get('cache-control', '')
+    for part in cc.split(','):
+        part = part.strip()
+        if part.startswith('max-age='):
+            try:
+                max_age = int(part[8:])
+            except ValueError:
+                pass
+    if max_age == 0 and 'expires' in headers:
+        try:
+            from email.utils import parsedate_to_datetime
+            expires_dt = parsedate_to_datetime(headers['expires'])
+            max_age = max(0, int(expires_dt.timestamp() - time.time()))
+        except Exception:
+            pass
+    if max_age <= 0:
+        max_age = 3600
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    path = os.path.join(CACHE_DIR, cache_key(url))
+    with open(path, 'w', encoding='utf-8') as f:
+        json.dump({'headers': headers, 'body': body, 'expires': time.time() + max_age}, f)
 
 
 def decode_chunked(data: bytes) -> bytes:
@@ -60,6 +106,10 @@ def parse_url(url):
 
 
 def http_get(url, max_redirects=5):
+    cached = cache_load(url)
+    if cached:
+        return 200, cached[0], cached[1]
+
     for _ in range(max_redirects):
         scheme, host, port, path = parse_url(url)
 
@@ -119,6 +169,7 @@ def http_get(url, max_redirects=5):
             url = headers['location']
             continue
 
+        cache_save(url, headers, body)
         return status_code, headers, body
 
     raise Exception('Too many redirects')
