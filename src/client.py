@@ -128,7 +128,8 @@ def http_get(url, max_redirects=5):
                 f"Host: {host}\r\n"
                 f"Connection: close\r\n"
                 f"User-Agent: go2web/1.0\r\n"
-                f"Accept: text/html,application/json\r\n"
+                f"Accept: application/json;q=1.0,text/html;q=0.9,*/*;q=0.8\r\n"
+                f"Accept-Language: en-US,en;q=0.9\r\n"
                 f"\r\n"
             )
             sock.sendall(request.encode())
@@ -223,7 +224,10 @@ def handle_url(url):
     content_type = headers.get('content-type', '')
 
     if 'json' in content_type:
-        print(body)
+        try:
+            print(json.dumps(json.loads(body), indent=2, ensure_ascii=False))
+        except json.JSONDecodeError:
+            print(body)
     else:
         print(strip_html(body))
 
