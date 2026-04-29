@@ -6,7 +6,7 @@ import os
 import json
 import hashlib
 import time
-from urllib.parse import urlparse, quote_plus, unquote_plus
+from urllib.parse import urlparse, quote_plus
 
 CACHE_DIR = os.path.join(os.path.dirname(__file__), '..', '.cache')
 
@@ -176,9 +176,58 @@ def http_get(url, max_redirects=5):
     raise Exception('Too many redirects')
 
 
+def http_post(url, data):
+    scheme, host, port, path = parse_url(url)
+    body_bytes = data.encode()
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.settimeout(10)
+    try:
+        sock.connect((host, port))
+        if scheme == 'https':
+            ctx = ssl.create_default_context()
+            sock = ctx.wrap_socket(sock, server_hostname=host)
+        request = (
+            f"POST {path} HTTP/1.1\r\n"
+            f"Host: {host}\r\n"
+            f"Connection: close\r\n"
+            f"User-Agent: go2web/1.0\r\n"
+            f"Content-Type: application/x-www-form-urlencoded\r\n"
+            f"Content-Length: {len(body_bytes)}\r\n"
+            f"\r\n"
+        ).encode() + body_bytes
+        sock.sendall(request)
+        chunks = []
+        while True:
+            chunk = sock.recv(4096)
+            if not chunk:
+                break
+            chunks.append(chunk)
+    finally:
+        sock.close()
+
+    raw = b''.join(chunks)
+    if b'\r\n\r\n' in raw:
+        headers_raw, body_raw = raw.split(b'\r\n\r\n', 1)
+    else:
+        headers_raw, body_raw = raw, b''
+
+    headers_text = headers_raw.decode('utf-8', errors='replace')
+    header_lines = headers_text.split('\r\n')
+    status_code = int(header_lines[0].split(' ', 2)[1])
+    headers = {}
+    for line in header_lines[1:]:
+        if ':' in line:
+            k, v = line.split(':', 1)
+            headers[k.strip().lower()] = v.strip()
+    if headers.get('transfer-encoding', '').lower() == 'chunked':
+        body_raw = decode_chunked(body_raw)
+    return status_code, headers, body_raw.decode('utf-8', errors='replace')
+
+
 def get_search_results(search_term):
     query = quote_plus(search_term)
-    _, _, body = http_get(f"https://html.duckduckgo.com/html/?q={query}")
+    _, _, body = http_post('https://html.duckduckgo.com/html/', f'q={query}&b=&kl=')
 
     raw = re.findall(
         r'<a[^>]+class="result__a"[^>]*href="([^"]+)"[^>]*>(.*?)</a>',
@@ -191,10 +240,11 @@ def get_search_results(search_term):
         if len(results) >= 10:
             break
         title = strip_html(title).strip()
+        from urllib.parse import unquote_plus
         uddg = re.search(r'[?&]uddg=([^&]+)', href)
         if uddg:
             href = unquote_plus(uddg.group(1))
-        if title and href:
+        if title and href.startswith('http'):
             results.append((title, href))
     return results
 
