@@ -2,16 +2,15 @@ import sys
 import socket
 import ssl
 import re
-from urllib.parse import urlparse
+from urllib.parse import urlparse, quote_plus, unquote_plus
+
+if sys.stdout.encoding and sys.stdout.encoding.lower() != 'utf-8':
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 
 
 def strip_html(text):
-    """Remove HTML tags and decode common entities."""
-    # Remove script and style blocks entirely
     text = re.sub(r'<(script|style)[^>]*>.*?</(script|style)>', '', text, flags=re.DOTALL | re.IGNORECASE)
-    # Remove all remaining tags
     text = re.sub(r'<[^>]+>', '', text)
-    # Decode common HTML entities
     entities = {
         '&amp;': '&', '&lt;': '<', '&gt;': '>', '&quot;': '"',
         '&#39;': "'", '&nbsp;': ' ', '&mdash;': '--', '&ndash;': '-',
@@ -19,33 +18,35 @@ def strip_html(text):
     }
     for entity, char in entities.items():
         text = text.replace(entity, char)
-    # Remove numeric entities
     text = re.sub(r'&#\d+;', '', text)
     text = re.sub(r'&[a-zA-Z]+;', '', text)
-    # Collapse whitespace
     text = re.sub(r'\n{3,}', '\n\n', text)
     text = re.sub(r'[ \t]+', ' ', text)
     return text.strip()
 
 
-def decode_chunked(body):
-    """Decode HTTP chunked transfer encoding."""
-    result = []
-    while body:
-        line_end = body.find('\r\n')
+def decode_chunked(data: bytes) -> bytes:
+    result = bytearray()
+    while data:
+        line_end = data.find(b'\r\n')
         if line_end == -1:
             break
-        size = int(body[:line_end].split(';')[0], 16)
+        size_str = data[:line_end].split(b';')[0].strip()
+        if not size_str:
+            data = data[line_end + 2:]
+            continue
+        try:
+            size = int(size_str, 16)
+        except ValueError:
+            break
         if size == 0:
             break
-        chunk = body[line_end + 2: line_end + 2 + size]
-        result.append(chunk)
-        body = body[line_end + 2 + size + 2:]
-    return ''.join(result)
+        result.extend(data[line_end + 2: line_end + 2 + size])
+        data = data[line_end + 2 + size + 2:]
+    return bytes(result)
 
 
 def parse_url(url):
-    """Parse URL into (scheme, host, port, path)."""
     if not url.startswith('http://') and not url.startswith('https://'):
         url = 'http://' + url
     parsed = urlparse(url)
@@ -59,7 +60,6 @@ def parse_url(url):
 
 
 def http_get(url, max_redirects=5):
-    """Make an HTTP GET request over a raw TCP socket. Follows redirects."""
     for _ in range(max_redirects):
         scheme, host, port, path = parse_url(url)
 
@@ -83,7 +83,6 @@ def http_get(url, max_redirects=5):
             )
             sock.sendall(request.encode())
 
-            # Read full response
             chunks = []
             while True:
                 chunk = sock.recv(4096)
@@ -93,15 +92,15 @@ def http_get(url, max_redirects=5):
         finally:
             sock.close()
 
-        raw = b''.join(chunks).decode('utf-8', errors='replace')
+        raw = b''.join(chunks)
 
-        # Split headers from body
-        if '\r\n\r\n' in raw:
-            headers_part, body = raw.split('\r\n\r\n', 1)
+        if b'\r\n\r\n' in raw:
+            headers_raw, body_raw = raw.split(b'\r\n\r\n', 1)
         else:
-            headers_part, body = raw, ''
+            headers_raw, body_raw = raw, b''
 
-        header_lines = headers_part.split('\r\n')
+        headers_text = headers_raw.decode('utf-8', errors='replace')
+        header_lines = headers_text.split('\r\n')
         status_line = header_lines[0]
         status_code = int(status_line.split(' ', 2)[1])
 
@@ -111,18 +110,45 @@ def http_get(url, max_redirects=5):
                 k, v = line.split(':', 1)
                 headers[k.strip().lower()] = v.strip()
 
-        # Decode chunked transfer encoding
         if headers.get('transfer-encoding', '').lower() == 'chunked':
-            body = decode_chunked(body)
+            body_raw = decode_chunked(body_raw)
 
-        # Handle redirects
+        body = body_raw.decode('utf-8', errors='replace')
+
         if status_code in (301, 302, 303, 307, 308) and 'location' in headers:
             url = headers['location']
             continue
 
         return status_code, headers, body
 
-    raise Exception(f"Too many redirects")
+    raise Exception('Too many redirects')
+
+
+def handle_search(search_term):
+    query = quote_plus(search_term)
+    _, _, body = http_get(f"https://html.duckduckgo.com/html/?q={query}")
+
+    results = re.findall(
+        r'<a[^>]+class="result__a"[^>]*href="([^"]+)"[^>]*>(.*?)</a>',
+        body,
+        re.DOTALL | re.IGNORECASE,
+    )
+
+    count = 0
+    for href, title in results:
+        if count >= 10:
+            break
+        title = strip_html(title).strip()
+        uddg = re.search(r'[?&]uddg=([^&]+)', href)
+        if uddg:
+            href = unquote_plus(uddg.group(1))
+        if title and href:
+            count += 1
+            print(f"{count}. {title}")
+            print(f"   {href}\n")
+
+    if count == 0:
+        print("No results found.")
 
 
 def handle_url(url):
@@ -160,7 +186,7 @@ def main():
             print("Error: -s requires a search term")
             sys.exit(1)
         search_term = ' '.join(args[1:])
-        print(f"Search not yet implemented. Term: {search_term}")
+        handle_search(search_term)
 
     else:
         print(f"Unknown option: {args[0]}")
